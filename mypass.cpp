@@ -60,8 +60,8 @@ struct HW1Pass : public FunctionPass {
 			// process blocks in loops
 			for (BasicBlock* cur_seed : BFSorder) {
 				if (seen_in_trace.find(cur_seed) == seen_in_trace.end()) {
-					auto cur_trace = growTrace(cur_seed, seen_in_trace);
-					// add cur trace to res
+          auto cur_trace = growTrace(cur_seed, seen_in_trace);
+          // add cur trace to res
           res.push_back(cur_trace);
 				}
 			}
