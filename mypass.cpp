@@ -75,43 +75,42 @@ struct HW1Pass : public FunctionPass {
     for (Function::iterator b = F.begin(), be = F.end(); b != be; ++b) {
       BasicBlock* BB = &*b;
       if (seen_in_trace.find(BB) == seen_in_trace.end()){
-				// Add the first BB into the queue
-				queue.insert(queue.begin(), BB);
-				seen.insert(BB);
-				BFSorder.push_back(BB);
-				break;
-			}
+        // Add the first BB into the queue
+        queue.insert(queue.begin(), BB);
+        seen.insert(BB);
+        BFSorder.push_back(BB);
+        break;
+      }
     }
 
 		// BFS starts
-		while (!queue.empty()) {
-			// left side queue entry, right side queue exit
-			BasicBlock* cur_node = queue.back();
-			for (BasicBlock* child : successors(cur_node)) {
-				if (seen.find(child) == seen.end() && seen_in_trace.find(child) == seen_in_trace.end()) {
-					seen.insert(child);
-					queue.insert(queue.begin(), child);
-					BFSorder.push_back(child);
-				}
-			}
+    while (!queue.empty()) {
+      // left side queue entry, right side queue exit
+      BasicBlock* cur_node = queue.back();
+      for (BasicBlock* child : successors(cur_node)) {
+        if (seen.find(child) == seen.end() && seen_in_trace.find(child) == seen_in_trace.end()) {
+          seen.insert(child);
+          queue.insert(queue.begin(), child);
+          BFSorder.push_back(child);
+        }
+      }
 
       // pop from the queue
-			queue.pop_back();
-		}
+      queue.pop_back();
+    }
 
-		for (BasicBlock* cur_seed : BFSorder) {
-			if (seen_in_trace.find(cur_seed) == seen_in_trace.end()) {
-				auto cur_trace = growTrace(cur_seed, seen_in_trace);
-				// add cur trace to res
+    for (BasicBlock* cur_seed : BFSorder) {
+      if (seen_in_trace.find(cur_seed) == seen_in_trace.end()) {
+        auto cur_trace = growTrace(cur_seed, seen_in_trace);
+        // add cur trace to res
         res.push_back(cur_trace);
-			}
-		}
-
-		return res;
-	}
+      }
+    }
+    return res;
+  }
 
 	std::vector<BasicBlock*> growTrace(BasicBlock* seed, std::unordered_set<BasicBlock*> seen) {
-		std::vector<BasicBlock*> res;
+	   std::vector<BasicBlock*> res;
 		return res;
 	}
 
