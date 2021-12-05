@@ -14,9 +14,9 @@
 using namespace llvm;
 
 namespace {
-struct stats_collector : public FunctionPass {
+struct HW1Pass : public FunctionPass {
 	static char ID;
-	stats_collector() : FunctionPass(ID) {}
+	HW1Pass() : FunctionPass(ID) {}
 
 	void getAnalysisUsage(AnalysisUsage &AU) const {
 		AU.addRequired<LoopInfoWrapperPass>();
@@ -62,6 +62,7 @@ struct stats_collector : public FunctionPass {
 				if (seen_in_trace.find(cur_seed) == seen_in_trace.end()) {
 					auto cur_trace = growTrace(cur_seed, seen_in_trace);
 
+          res.push_back(cur_trace);
 					// add cur trace to res
 				}
 			}
@@ -71,16 +72,16 @@ struct stats_collector : public FunctionPass {
 		std::vector<BasicBlock*> BFSorder;
 		std::vector<BasicBlock*> queue;
 
-		for (BasicBlock& BB: F) {
-			// in case that the first BB itself is a loop
-			if (seen_in_trace.find(BB) == seen_in_trace.end()){
+    for (Function::iterator b = F.begin(), be = F.end(); b != be; ++b) {
+      BasicBlock* BB = &*b;
+      if (seen_in_trace.find(BB) == seen_in_trace.end()){
 				// Add the first BB into the queue
 				queue.insert(queue.begin(), BB);
 				seen.insert(BB);
 				BFSorder.push_back(BB);
 				break;
 			}
-		}
+    }
 
 		// BFS starts
 		while (!queue.empty()) {
@@ -93,6 +94,8 @@ struct stats_collector : public FunctionPass {
 					BFSorder.push_back(child);
 				}
 			}
+
+      // pop from the queue
 			queue.pop_back();
 		}
 
@@ -100,9 +103,9 @@ struct stats_collector : public FunctionPass {
 			if (seen_in_trace.find(cur_seed) == seen_in_trace.end()) {
 				auto cur_trace = growTrace(cur_seed, seen_in_trace);
 				// add cur trace to res
+        res.push_back(cur_trace);
 			}
 		}
-
 
 		return res;
 	}
@@ -119,7 +122,7 @@ struct stats_collector : public FunctionPass {
 }; // end of struct Hell
 }  // end of anonymous namespace
 
-char stats_collector::ID = 0;
-static RegisterPass<stats_collector> X("stats_collector", "stats collector",
+char HW1Pass::ID = 0;
+static RegisterPass<HW1Pass> X("HW1Pass", "stats collector",
                              	false /* Only looks at CFG */,
                              	false /* Analysis Pass */);
