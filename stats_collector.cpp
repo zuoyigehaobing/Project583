@@ -2,6 +2,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Instruction.def"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Format.h"
@@ -28,6 +29,8 @@ struct stats_collector : public FunctionPass {
 		LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
 		PostDominatorTree& PDT = getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
 		auto Traces = traceFormation(&LI, &PDT, F);
+
+		return false;
 	}
 
 	std::vector<std::vector<BasicBlock*>> traceFormation(LoopInfo* LI, PostDominatorTree* PDT, Function& F) {
@@ -35,25 +38,97 @@ struct stats_collector : public FunctionPass {
 		std::vector<std::vector<BasicBlock*>> res;
 		std::unordered_set<BasicBlock*> seen_in_trace;
 
-		// before growing trace with seed, identify basic blocks with hazardous instructions
+		// identify basic blocks with hazardous instructions
 		std::map<BasicBlock*, bool> contains_hazard;
-		std::unordered_set<unsigned> hazardous_opcodes = {
-			Instruction::CallBr,
-			Instruction::Invoke,
-			Instruction::Ret,
-			Instruction::IndirectBr,
-		}
+		std::map<BasicBlock*, bool> contains_indirectbr;
+		std::map<BasicBlock*, bool> contains_rt;
+		// store all possible conditional branches for later use
+		std::vector<Instruction*> conditional_branches;
+
 		for (BasicBlock& BB : F) {
+			contains_hazard[&BB] = false;
+			contains_indirectbr[&BB] = false;
+			contains_rt[&BB] = false;
 			for (Instruction& I : BB) {
 				unsigned cur_opcode = I.getOpcode();
-				if (hazardous_opcodes.count(cur_opcode)) {
+				if (cur_opcode == Instruction::IndirectBr) {
+					contains_indirectbr[&BB] = true;
 					contains_hazard[&BB] = true;
 				}
-				else if (cur_opcode == Instruction::Store) {
-					//dyn_cast pointer argument to Instruction, check if it is getelementptr
+				else if (cur_opcode == Instruction::Ret) {
+					contains_rt[&BB] = true;
+					contains_hazard[&BB] = true;
+				}
+				else if (cur_opcode == Instruction::CallBr || cur_opcode == Instruction::Invoke || cur_opcode == Instruction::Store) {
+					contains_hazard[&BB] = true;
+				}
+
+				// store all conditional branches for later use
+				else if (cur_opcode == Instruction::Br) {
+					if (BranchInst* BI = dyn_cast<BranchInst>(&I)) {
+						if (BI->isConditional()) {
+							conditional_branches.push_back(&I);
+						}
+					}
 				}
 			}
 		}
+
+		// make predictions for conditional branches
+		std::map<Instruction*, int> hazard_predicted;
+		std::map<Instruction*, int> path_predicted;
+
+		// first pass to deal with hazard heuristic
+		for (Instruction* I : conditional_branches) {
+			BranchInst* BI = dyn_cast<BranchInst>(I);
+			errs() << *BI << "\n";
+			// check first successor
+			BasicBlock* first_child = BI->getSuccessor(0);
+			if (contains_hazard[first_child]) {
+				hazard_predicted[I] = 1;
+				continue;
+			}
+			// check if first successor child yield to hazardous block unconditionally
+			else {
+				Instruction* first_child_terminator = first_child->getTerminator();
+				if (BranchInst* first_child_terminator_B = dyn_cast<BranchInst>(first_child_terminator)) {
+					if (first_child_terminator_B->isUnconditional()) {
+						BasicBlock* first_child_child = first_child_terminator_B->getSuccessor(0);
+						if (contains_hazard[first_child_child] && !PDT->dominates(first_child_terminator, I)) {
+							hazard_predicted[I] = 1;
+							continue;
+						}
+					}
+				}
+			}
+
+			// check second successor
+			BasicBlock* second_child = BI->getSuccessor(1);
+			if (contains_hazard[second_child]) {
+				hazard_predicted[I] = 0;
+			}
+			// check if first successor child yield to hazardous block unconditionally
+			else {
+				Instruction* second_child_terminator = second_child->getTerminator();
+				if (BranchInst* second_child_terminator_B = dyn_cast<BranchInst>(second_child_terminator)) {
+					if (second_child_terminator_B->isUnconditional()) {
+						BasicBlock* second_child_child = second_child_terminator_B->getSuccessor(0);
+						if (contains_hazard[second_child_child] && !PDT->dominates(second_child_terminator, I)) {
+							hazard_predicted[I] = 0;
+						}
+					}
+				}
+			}
+		}
+
+		// // second pass to deal with path selection heuristic
+		// for (Instruction* I : conditional_branches) {
+		// 	// only predict branches not predicted by hazard heuristic
+		// 	if (hazard_predicted.find(I) == hazard_predicted.end()) {
+		//
+		// 	}
+		// }
+
 
 
 		// grow blocks in loops
@@ -82,8 +157,8 @@ struct stats_collector : public FunctionPass {
 			// process blocks in loops
 			for (BasicBlock* cur_seed : BFSorder) {
 				if (seen_in_trace.find(cur_seed) == seen_in_trace.end()) {
-					auto cur_trace = growTrace(cur_seed, seen_in_trace);
-					res.insert(res.begin(),cur_trace);
+					auto cur_trace = growTrace(cur_seed, contains_indirectbr, contains_rt, hazard_predicted, path_predicted, seen_in_trace);
+					res.push_back(cur_trace);
 				}
 			}
 		}
@@ -118,7 +193,7 @@ struct stats_collector : public FunctionPass {
 
 		for (BasicBlock* cur_seed : BFSorder) {
 			if (seen_in_trace.find(cur_seed) == seen_in_trace.end()) {
-				auto cur_trace = growTrace(cur_seed, seen_in_trace);
+				auto cur_trace = growTrace(cur_seed, contains_indirectbr, contains_rt, hazard_predicted, path_predicted, seen_in_trace);
 				// add cur trace to res
 				res.push_back(cur_trace);
 			}
@@ -126,8 +201,28 @@ struct stats_collector : public FunctionPass {
 		return res;
 	}
 
-	std::vector<BasicBlock*> growTrace(BasicBlock* seed, std::unordered_set<BasicBlock*> seen) {
-		 std::vector<BasicBlock*> res;
+	std::vector<BasicBlock*> growTrace(
+		BasicBlock* seed,
+		std::map<BasicBlock*, bool>& contains_indirectbr,
+		std::map<BasicBlock*, bool>& contains_rt,
+		std::map<Instruction*, int>& hazard_predicted,
+		std::map<Instruction*, int>& path_predicted,
+		std::unordered_set<BasicBlock*>& seen_in_trace
+	) {
+		std::vector<BasicBlock*> res;
+		res.push_back(seed);
+		BasicBlock* cur_node = seed;
+		while (true) {
+			seen_in_trace.insert(cur_node);
+			if (contains_indirectbr[cur_node]) {
+				break;
+			}
+			if (contains_rt[cur_node]) {
+				break;
+			}
+			// pick likely block
+
+		}
 		return res;
 	}
 
