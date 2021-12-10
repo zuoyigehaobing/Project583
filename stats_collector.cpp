@@ -32,6 +32,15 @@ struct stats_collector : public FunctionPass {
 		PostDominatorTree& PDT = getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
 		DominatorTree& DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
 		auto Traces = traceFormation(&LI, &PDT, &DT, F);
+		// errs() << "----traces formed----" << "\n";
+		// for (auto trace : Traces) {
+		// 	errs() << "----start of trace----\n";
+		// 	for (auto bb : trace) {
+		// 		errs() << *bb << "\n";
+		// 		errs() << "--------\n";
+		// 	}
+		// 	errs() << "----end of trace----\n";
+		// }
 
 		return false;
 	}
@@ -571,6 +580,25 @@ struct stats_collector : public FunctionPass {
 			}
 		}
 
+		errs() << "----predicted by hazard----" << "\n";
+		for (const auto & p: hazard_predicted) {
+			errs() << *(p.first) << "\n";
+			errs() << "\n";
+		}
+		errs() << "num predicted by hazard = " << hazard_predicted.size() << "\n";
+		errs() << "\n";
+
+		errs() << "----predicted by path selection----" << "\n";
+		for (const auto & p: path_predicted) {
+			errs() << *(p.first) << "\n";
+			errs() << "\n";
+		}
+		errs() << "num predicted by path selection = " << path_predicted.size() << "\n";
+		errs() << "\n";
+
+		errs() << "num conditional branches =" << conditional_branches.size() << "\n";
+		errs() << "\n";
+
 
 
 		// grow blocks in loops
@@ -623,9 +651,7 @@ struct stats_collector : public FunctionPass {
 				if (seen.find(child) == seen.end()) {
 					seen.insert(child);
 					queue.insert(queue.begin(), child);
-					if (seen_in_trace.find(child) == seen_in_trace.end()) {
-						BFSorder.push_back(child);
-					}
+					BFSorder.push_back(child);
 				}
 			}
 
