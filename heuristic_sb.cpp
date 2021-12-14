@@ -9,6 +9,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/BranchProbability.h"
+#include "llvm/Analysis/DominanceFrontier.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/BranchProbabilityInfo.h"
@@ -25,6 +26,7 @@
 #include <time.h>       /* time */
 
 using namespace llvm;
+using namespace std;
 
 int glb_hazard_count = 0;
 int glb_hazard_agree = 0;
@@ -45,6 +47,7 @@ struct heuristic_sb : public FunctionPass {
 		AU.addRequired<DominatorTreeWrapperPass>();
 		AU.addRequired<BlockFrequencyInfoWrapperPass>();
 		AU.addRequired<BranchProbabilityInfoWrapperPass>();
+		AU.addRequired<DominanceFrontierWrapperPass>();
 	}
 	bool runOnFunction(Function &F) override {
 		LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -65,19 +68,18 @@ struct heuristic_sb : public FunctionPass {
 		// 	errs() << "----end of trace----\n";
 		// }
 		//
-		// int count = 0;
-		// std::map<BasicBlock*, int> tracemap;
-		// for (auto trace : Traces) {
-		// 	for (BasicBlock* bb : trace) {
-		// 		tracemap[bb] = count;
-		// 	}
-		// 	count += 1;
-		// }
-		//
-		// bool res = tailDuplication(Traces, tracemap, &F);
-		// errs() << "modified in tail duplication: " << res << "\n";
-		// return res;
-		return false;
+		int count = 0;
+		std::map<BasicBlock*, int> tracemap;
+		for (auto trace : Traces) {
+			for (BasicBlock* bb : trace) {
+				tracemap[bb] = count;
+			}
+			count += 1;
+		}
+
+		bool res = tailDuplication(Traces, tracemap, &F);
+		errs() << "modified in tail duplication: " << res << "\n";
+		return res;
 	}
 
 	std::vector<std::vector<BasicBlock*>> traceFormation(
@@ -757,7 +759,7 @@ struct heuristic_sb : public FunctionPass {
 
 		// grow blocks in loops
 		auto loopVec_PreOrd = LI->getLoopsInPreorder();
-		sort(loopVec_PreOrd.begin(), loopVec_PreOrd.end(), LoopDepthGt);
+		std::sort(loopVec_PreOrd.begin(), loopVec_PreOrd.end(), LoopDepthGt);
 		for (auto* loop : loopVec_PreOrd) {
 			// create BFS Traversal of basic blocks in this loop
 			std::unordered_set<BasicBlock*> seen;
@@ -887,6 +889,7 @@ struct heuristic_sb : public FunctionPass {
 	}
 
 	bool tailDuplication(std::vector<std::vector<BasicBlock*>> traces, std::map<BasicBlock*, int> TraceMap, Function* Parent) {
+		DominanceFrontier &df = getAnalysis<DominanceFrontierWrapperPass>().getDominanceFrontier();
 		// copied BB
 		std::map<BasicBlock*, BasicBlock*> copiedMap;
 		ValueToValueMapTy VMap;
@@ -898,19 +901,21 @@ struct heuristic_sb : public FunctionPass {
 			BasicBlock* prevBB = *curTrace.begin();
 			for (auto it = next(curTrace.begin()); it != curTrace.end(); ++it) {  // Ignore first BB
 				BasicBlock* originalBB = *it;
+				BasicBlock* clonedBB;
+				// ValueToValueMapTy VMap;
 				if (!doCopy) {  // detect first side entrance
 					for (auto pred : predecessors(originalBB)) {
 						// if predecessor not in trace, side entrance
 						if (TraceMap[pred] != TraceMap[originalBB]) {
 							modified = true;
 							doCopy = true;
-
 							// copy first original block
-							BasicBlock* clonedBB = CloneBasicBlock(originalBB, VMap, "", Parent);
+							clonedBB = CloneBasicBlock(originalBB, VMap, "", Parent);
+							VMap[originalBB] = clonedBB;
 
 							// find predecessor in trace, connect predecessor and copy
 							Instruction* term = prevBB->getTerminator();
-							// set prevBB's successor
+							// set prevBB's successor, remove edge between predecessor and original
 							// find idx of origBB in trace, substitute with copiedBB
 							unsigned idx = 0;
 							for (auto succ : successors(prevBB)) {
@@ -922,12 +927,8 @@ struct heuristic_sb : public FunctionPass {
 							term->setSuccessor(idx, clonedBB);
 
 							for (Instruction &II : *clonedBB) {
-								RemapInstruction(&II, VMap, RF_IgnoreMissingLocals);
+								RemapInstruction(&II, VMap, RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
 							}
-
-							// remove edge between predecessor and original
-							// errs()<< "\noriginal basic block \n" << *originalBB << "\n";
-							// errs()<< "\nclone basic block \n" << *clonedBB << "\n";
 
 							prevCopiedBB = clonedBB;
 							break;
@@ -939,8 +940,8 @@ struct heuristic_sb : public FunctionPass {
 				// tail portion
 				else {
 					// Copy current BB
-					BasicBlock* clonedBB = CloneBasicBlock(originalBB, VMap, "", Parent);
-
+					clonedBB = CloneBasicBlock(originalBB, VMap, "", Parent);
+					VMap[originalBB] = clonedBB;
 					// previously copied BB connects to copied BB
 					// remove edge between previously copied and current copied BB
 					Instruction* term = prevCopiedBB->getTerminator();
@@ -954,11 +955,185 @@ struct heuristic_sb : public FunctionPass {
 					term->setSuccessor(idx, clonedBB);
 
 					for (Instruction &II : *clonedBB) {
-						RemapInstruction(&II, VMap, RF_IgnoreMissingLocals);
+						RemapInstruction(&II, VMap, RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
+					}
+					prevCopiedBB = clonedBB;
+				}
+
+				if (doCopy) {  // if we just cloned a BB:
+
+					////////////////////////      PHI NODE HANDLING      ////////////////////////
+					// 1) Handle repeat defs in originalBB & clonedBB
+					// go to clonedBB/origBB's def-instr's uses' BB, check phi nodes
+					// 1a) no phinode for the def value: add phinode for the def from origBB vs clonedBB
+					// 1b) exist phinode, add clonedBB's def value to it
+
+					// Check VMap
+					ValueToValueMapTy::iterator VMapItr;
+					int idx = 0;
+					BasicBlock::iterator initialBC = clonedBB->begin();
+					Instruction* oFirstNonPhi = originalBB->getFirstNonPHI();
+					for (BasicBlock::iterator BI = originalBB->begin(), BE = originalBB->end(); BI != BE; ++BI) {
+						BasicBlock::iterator BC =  next(initialBC, idx);
+						Instruction* clonedInst = dyn_cast<Instruction>(BC);
+						Instruction* origInst = dyn_cast<Instruction>(BI);
+
+						for (User *U : BI->users()) {
+							if (Instruction* useInstr = dyn_cast<Instruction>(U)) {
+								// Create Phi Node only when not in trace (side exit/trace exit)
+								if (TraceMap[useInstr->getParent()] == TraceMap[originalBB]) {
+									continue;
+								}
+
+								Value* origValue = dyn_cast<Value>(BI);
+								Value* clonedValue = dyn_cast<Value>(clonedInst);
+								// Already exist Phi node
+
+								PHINode *Phi = dyn_cast<PHINode>(U);
+								if (Phi) {
+									Phi->addIncoming(clonedValue, clonedBB);
+								}
+								else {
+									Instruction* firstNonPhi = useInstr->getParent()->getFirstNonPHI();
+									PHINode *Phi = PHINode::Create(clonedInst->getType(), 2, "", firstNonPhi);
+									Phi->addIncoming(origInst, originalBB);
+									Phi->addIncoming(clonedInst, clonedBB);
+								}
+							}
+						}
+						idx++;
 					}
 
-					// prev = cur
-					prevCopiedBB = clonedBB;
+					// 2) Handle exising phi node, remove unecessary operand
+					// Check if incoming BB reachable to original/cloneBB (BFS).
+					// If not, remove
+					for (BasicBlock::iterator BI = originalBB->begin(), BE = originalBB->end(); BI != BE; ++BI) {
+						PHINode *Phi = dyn_cast<PHINode>(&*BI);
+						if (!Phi) {
+							break;
+						}
+
+						// getNumIncomingValues()
+						vector<BasicBlock*> RemList;
+						vector<pair<Value*, BasicBlock*>> AddList;
+						for (unsigned i = 0, e = Phi->getNumIncomingValues(); i != e; ++i) {
+							BasicBlock* incomingBB = Phi->getIncomingBlock(i);
+							Value* incomingInstr = Phi->getIncomingValue(i);
+
+							bool found = false;
+							for (auto succ : successors(incomingBB)) {
+								if (succ == originalBB) {
+									found = true;
+									break;
+								}
+							}
+							if (!found) {
+								RemList.push_back(incomingBB);
+							}
+						}
+						for (auto& remBB: RemList) {
+							if (Phi) {
+								Phi->removeIncomingValue(remBB, false);
+							}
+						}
+
+						if (pred_size(originalBB) > Phi->getNumIncomingValues()) {
+							bool found = false;
+							Value* incomingInstrVal;
+							for (auto opred: predecessors(originalBB)) {
+								for (unsigned i = 0, e = Phi->getNumIncomingValues(); i != e; ++i) {
+									BasicBlock* incomingBB = Phi->getIncomingBlock(i);
+									incomingInstrVal = Phi->getIncomingValue(i);
+									if (incomingBB == opred) {
+										found = true;
+										break;
+									}
+								}
+								if (!found) {
+									// Find phi's incomingBB's VMap corresponds to opred
+									for (unsigned i = 0, e = Phi->getNumIncomingValues(); i != e; ++i) {
+										incomingInstrVal = Phi->getIncomingValue(i);
+										BasicBlock* inBB = Phi->getIncomingBlock(i);
+										Value* cInBBVal = VMap[inBB];
+
+										const Value * cIncomVal = incomingInstrVal;
+										Value* mVal = VMap[cIncomVal];
+										if (Instruction* mInstr = dyn_cast<Instruction>(mVal)) {
+											if (mInstr->getParent() == opred) {
+												pair<Value*, BasicBlock*> tp(mVal, opred);
+												AddList.push_back(tp);
+												break;
+											}
+										} else if (BasicBlock* cInBB = dyn_cast<BasicBlock>(cInBBVal)) {
+											if (cInBB == opred) {
+												pair<Value*, BasicBlock*> tp(mVal, opred);
+												AddList.push_back(tp);
+												break;
+											}
+										}
+									}
+								}
+								found = false;
+							}
+							for (pair<Value*, BasicBlock*> addPair: AddList) {
+								Value* addVal = addPair.first;
+								BasicBlock* addBB = addPair.second;
+								Phi->addIncoming(addVal, addBB);
+							}
+
+						}
+					}
+
+					bool allIncomExpired = true;
+					for (BasicBlock::iterator BI = clonedBB->begin(), BE = clonedBB->end(); BI != BE; ++BI) {
+						PHINode *Phi = dyn_cast<PHINode>(&*BI);
+						allIncomExpired = true;
+						if (!Phi) {
+							break;
+						}
+
+						// vector<BasicBlock*> RemList;
+						vector<pair<Value*, BasicBlock*>> ExpList;
+						for (unsigned i = 0, e = Phi->getNumIncomingValues(); i != e; ++i) {
+							BasicBlock* incomingBB = Phi->getIncomingBlock(i);
+							Value* incomingInstr = Phi->getIncomingValue(i);
+
+							bool found = false;
+							for (auto succ : successors(incomingBB)) {
+								if (succ == clonedBB) {
+									found = true;
+									allIncomExpired = false;
+									break;
+								}
+							}
+							if (!found) {
+								pair<Value*, BasicBlock*> p1(incomingInstr, incomingBB);
+								ExpList.push_back(p1);
+							}
+						}
+
+						// Remove invalid incoming values, before removing, first check if need to add new def
+						for (pair<Value*, BasicBlock*> expPair: ExpList) {
+
+							if (Instruction* expInstr = dyn_cast<Instruction>(expPair.first)) {
+								BasicBlock* remBB = expPair.second;
+								if (allIncomExpired && (TraceMap[remBB] == TraceMap[originalBB])) {
+									// if old incomingBB inside trace, find corresponding value from newly clonedBB
+									// to substitute in PHI node.
+									const Value * tVal = expPair.first;
+									Value* cVal = VMap[tVal];
+								}
+
+								Phi->removeIncomingValue(remBB, false);
+							} else {
+								// while.cond 29
+								BasicBlock* remBB = expPair.second;
+								Phi->removeIncomingValue(remBB, false);
+							}
+
+						}
+
+					}
 				}
 			}
 		}
