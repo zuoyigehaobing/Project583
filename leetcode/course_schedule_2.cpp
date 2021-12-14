@@ -1,5 +1,6 @@
 #include <utility>
 #include <vector>
+#include <queue>          // std::queue
 
 using namespace std;
 vector<int> findOrder(int numCourses, vector<pair<int, int>>& prerequisites) {
