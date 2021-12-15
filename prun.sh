@@ -4,24 +4,15 @@ PASS=-psbpass                  # Choose either -fplicm-correctness or -fplicm-pe
 # Delete outputs from previous run.
 rm -f default.profraw ${1}_prof ${1}_psb ${1}_rsb ${1}_no_sb *.bc ${1}.profdata *_output *.ll
 
-##################        HW! setup        ##################
-BENCH=src/${1}.c
-INPUT=${2}
-
-setup(){
-if [[ ! -z "${INPUT}" ]]; then
-echo "INPUT:${INPUT}"
-ln -sf input1/${INPUT} .
-fi
-}
-
-# Prepare input to run
-setup
 # Convert source code to bitcode (IR)
-# This approach has an issue with -O2, so we are going to stick with default optimization level (-O0)
-clang -emit-llvm -c ${BENCH} -o ${1}.bc -O0
-# Proj: Add Loop simplify
-opt -loop-simplify ${1}.bc -o ${1}.ls.bc
+clang -emit-llvm -c ${1}.c -o ${1}.bc
+# clang -emit-llvm -c ${1}.c -o ${1}.ls.bc
+
+# Proj: Mem2reg
+opt -mem2reg ${1}.bc -o ${1}.mr.bc
+
+# Canonicalize natural loops
+opt -loop-simplify ${1}.mr.bc -o ${1}.ls.bc
 
 # Proj: Add LICM 
 opt -licm ${1}.ls.bc -o ${1}.licm.bc
@@ -29,24 +20,14 @@ opt -licm ${1}.ls.bc -o ${1}.licm.bc
 opt -dce ${1}.licm.bc -o ${1}.dce.bc
 
 # Instrument profiler
-opt -pgo-instr-gen -instrprof ${1}.ls.bc -o ${1}.prof.bc
+opt -pgo-instr-gen -instrprof ${1}.ls.bc -o ${1}.ls.prof.bc
 # Generate binary executable with profiler embedded
-# clang -fprofile-instr-generate ${1}.prof.bc -o ${1}.prof
-clang -fprofile-instr-generate ${1}.prof.bc -o ${1}_prof
+clang -fprofile-instr-generate ${1}.ls.prof.bc -o ${1}_prof
 
+# Generate profiled data
+./${1}_prof > correct_output
+llvm-profdata merge -o ${1}.profdata default.profraw
 
-############# NOTE HW1 Format
-# Collect profiling data
-./${1}_prof ${INPUT} > correct_output
-
-# Translate raw profiling data into LLVM data format
-llvm-profdata merge -output=${1}.profdata default.profraw
-
-# Prepare input to run
-setup
-
-# Apply your pass to bitcode (IR)
-##################      end HW! setup      ##################
 # Apply Superblock
 opt -o ${1}.psb.bc -pgo-instr-use -pgo-test-profile-file=${1}.profdata -load ${PATH2LIB} -psbpass < ${1}.ls.bc > /dev/null
 opt -o ${1}.rsb.bc -pgo-instr-use -pgo-test-profile-file=${1}.profdata -load ${PATH2LIB} -rsbpass < ${1}.ls.bc > /dev/null
